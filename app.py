@@ -35,7 +35,7 @@ st.title("📚 Moj tutor")
 
 st.write(
     "Učitaj fotografije lekcije. "
-    "Aplikacija će napraviti kratke beleške i test za proveru znanja."
+    "Aplikacija će napraviti beleške, flashcards i test za proveru znanja."
 )
 
 
@@ -44,11 +44,6 @@ st.write(
 # =========================================================
 
 def image_to_data_url(uploaded_file):
-    """
-    Convert uploaded image into a base64 data URL
-    suitable for OpenRouter vision models.
-    """
-
     image = Image.open(uploaded_file)
 
     if image.mode != "RGB":
@@ -70,10 +65,6 @@ def image_to_data_url(uploaded_file):
 
 
 def call_openrouter(messages, temperature=0.2):
-    """
-    Generic OpenRouter API call.
-    """
-
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -104,11 +95,6 @@ def call_openrouter(messages, temperature=0.2):
 
 
 def extract_json(text):
-    """
-    Extract JSON from model response.
-    Handles responses wrapped in markdown fences.
-    """
-
     text = text.strip()
 
     if text.startswith("```"):
@@ -151,7 +137,7 @@ VAŽNO:
 - koristi isti jezik kao u udžbeniku;
 - beleške treba da budu kratke i pogodne za učenje.
 
-Vrati SAMO validan JSON u sledećem obliku:
+Vrati SAMO validan JSON:
 
 {
   "title": "naslov lekcije",
@@ -182,9 +168,7 @@ Vrati SAMO validan JSON u sledećem obliku:
 
     for uploaded_file in uploaded_files:
 
-        data_url = image_to_data_url(
-            uploaded_file
-        )
+        data_url = image_to_data_url(uploaded_file)
 
         content.append(
             {
@@ -205,6 +189,67 @@ Vrati SAMO validan JSON u sledećem obliku:
     response = call_openrouter(
         messages,
         temperature=0.1
+    )
+
+    return extract_json(response)
+
+
+# =========================================================
+# Flashcard generation
+# =========================================================
+
+def generate_flashcards(
+    lesson,
+    number_of_cards=8
+):
+
+    prompt = f"""
+Ti si nastavnik koji pravi flashcards za učenika osnovne škole.
+
+Koristi ISKLJUČIVO sadržaj lekcije koji je dat ispod.
+
+Ne koristi dodatno znanje.
+
+Sadržaj lekcije:
+
+{json.dumps(
+    lesson,
+    ensure_ascii=False,
+    indent=2
+)}
+
+Napravi tačno {number_of_cards} flashcards.
+
+Pravila:
+- prednja strana treba da bude kratko pitanje;
+- zadnja strana treba da bude kratak i jasan odgovor;
+- jedna kartica treba da proverava jednu ideju;
+- obuhvati najvažnije pojmove i činjenice;
+- ne pravi trik pitanja;
+- odgovor mora biti zasnovan na sadržaju lekcije.
+
+Vrati SAMO validan JSON:
+
+{{
+  "flashcards": [
+    {{
+      "question": "pitanje",
+      "answer": "kratak odgovor"
+    }}
+  ]
+}}
+"""
+
+    messages = [
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+
+    response = call_openrouter(
+        messages,
+        temperature=0.3
     )
 
     return extract_json(response)
@@ -243,7 +288,6 @@ Koristi kombinaciju sledećih tipova:
 3. short_answer
 
 Pravila:
-
 - pitanja treba da proveravaju najvažnije delove lekcije;
 - neka pitanja proveravaju pamćenje;
 - neka pitanja proveravaju razumevanje;
@@ -314,11 +358,26 @@ if "lesson" not in st.session_state:
 if "quiz" not in st.session_state:
     st.session_state.quiz = None
 
+if "flashcards" not in st.session_state:
+    st.session_state.flashcards = None
+
 if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
 
 if "current_answers" not in st.session_state:
     st.session_state.current_answers = {}
+
+if "current_flashcard" not in st.session_state:
+    st.session_state.current_flashcard = 0
+
+if "show_flashcard_answer" not in st.session_state:
+    st.session_state.show_flashcard_answer = False
+
+if "known_flashcards" not in st.session_state:
+    st.session_state.known_flashcards = []
+
+if "repeat_flashcards" not in st.session_state:
+    st.session_state.repeat_flashcards = []
 
 
 # =========================================================
@@ -353,13 +412,9 @@ if uploaded_files:
         number_of_columns
     )
 
-    for i, file in enumerate(
-        uploaded_files
-    ):
+    for i, file in enumerate(uploaded_files):
 
-        with columns[
-            i % number_of_columns
-        ]:
+        with columns[i % number_of_columns]:
 
             st.image(
                 file,
@@ -391,8 +446,13 @@ if uploaded_files:
 
                 st.session_state.lesson = lesson
                 st.session_state.quiz = None
+                st.session_state.flashcards = None
                 st.session_state.quiz_submitted = False
                 st.session_state.current_answers = {}
+                st.session_state.current_flashcard = 0
+                st.session_state.show_flashcard_answer = False
+                st.session_state.known_flashcards = []
+                st.session_state.repeat_flashcards = []
 
             except Exception as e:
 
@@ -402,7 +462,7 @@ if uploaded_files:
 
 
 # =========================================================
-# Display lesson
+# Lesson display
 # =========================================================
 
 lesson = st.session_state.lesson
@@ -415,202 +475,427 @@ if lesson:
         f"2. {lesson.get('title', 'Lekcija')}"
     )
 
-    # Summary
-
-    st.subheader("Ukratko")
-
-    st.write(
-        lesson.get(
-            "summary",
-            ""
-        )
+    tab_notes, tab_flashcards, tab_quiz = st.tabs(
+        [
+            "📝 Beleške",
+            "🧠 Flashcards",
+            "🎯 Test"
+        ]
     )
 
-    # Notes
+    # =====================================================
+    # NOTES TAB
+    # =====================================================
 
-    notes = lesson.get(
-        "notes",
-        []
-    )
+    with tab_notes:
 
-    if notes:
+        st.subheader("Ukratko")
 
-        st.subheader(
-            "📝 Kratke beleške"
-        )
-
-        for note in notes:
-
-            st.write(
-                f"• {note}"
-            )
-
-    # Concepts
-
-    concepts = lesson.get(
-        "concepts",
-        []
-    )
-
-    if concepts:
-
-        st.subheader(
-            "🧠 Važni pojmovi"
-        )
-
-        for concept in concepts:
-
-            term = concept.get(
-                "term",
+        st.write(
+            lesson.get(
+                "summary",
                 ""
             )
-
-            definition = concept.get(
-                "definition",
-                ""
-            )
-
-            st.markdown(
-                f"**{term}:** {definition}"
-            )
-
-    # Facts
-
-    facts = lesson.get(
-        "facts",
-        []
-    )
-
-    if facts:
-
-        st.subheader(
-            "⭐ Zapamti"
         )
 
-        for fact in facts:
+        notes = lesson.get(
+            "notes",
+            []
+        )
 
-            st.write(
-                f"• {fact}"
+        if notes:
+
+            st.subheader(
+                "📝 Kratke beleške"
             )
 
+            for note in notes:
+                st.write(
+                    f"• {note}"
+                )
 
-# =========================================================
-# Generate quiz
-# =========================================================
+        concepts = lesson.get(
+            "concepts",
+            []
+        )
 
-if lesson:
+        if concepts:
 
-    st.divider()
+            st.subheader(
+                "🧠 Važni pojmovi"
+            )
 
-    st.header(
-        "3. Proveri znanje"
-    )
+            for concept in concepts:
 
-    number_of_questions = st.slider(
-        "Broj pitanja",
-        min_value=3,
-        max_value=10,
-        value=5
-    )
+                term = concept.get(
+                    "term",
+                    ""
+                )
 
-    if st.button(
-        "🎯 Napravi test"
-    ):
+                definition = concept.get(
+                    "definition",
+                    ""
+                )
 
-        with st.spinner(
-            "Pravim test..."
+                st.markdown(
+                    f"**{term}:** {definition}"
+                )
+
+        facts = lesson.get(
+            "facts",
+            []
+        )
+
+        if facts:
+
+            st.subheader(
+                "⭐ Zapamti"
+            )
+
+            for fact in facts:
+                st.write(
+                    f"• {fact}"
+                )
+
+
+    # =====================================================
+    # FLASHCARDS TAB
+    # =====================================================
+
+    with tab_flashcards:
+
+        st.subheader(
+            "🧠 Flashcards"
+        )
+
+        if st.session_state.flashcards is None:
+
+            number_of_cards = st.slider(
+                "Broj kartica",
+                min_value=5,
+                max_value=15,
+                value=8,
+                key="flashcard_count"
+            )
+
+            if st.button(
+                "✨ Napravi flashcards",
+                key="generate_flashcards"
+            ):
+
+                with st.spinner(
+                    "Pravim kartice..."
+                ):
+
+                    try:
+
+                        flashcards = generate_flashcards(
+                            lesson,
+                            number_of_cards
+                        )
+
+                        st.session_state.flashcards = flashcards
+                        st.session_state.current_flashcard = 0
+                        st.session_state.show_flashcard_answer = False
+                        st.session_state.known_flashcards = []
+                        st.session_state.repeat_flashcards = []
+
+                        st.rerun()
+
+                    except Exception as e:
+
+                        st.error(
+                            f"Greška: {e}"
+                        )
+
+        else:
+
+            flashcards = st.session_state.flashcards.get(
+                "flashcards",
+                []
+            )
+
+            total_cards = len(flashcards)
+
+            if total_cards:
+
+                index = st.session_state.current_flashcard
+
+                if index >= total_cards:
+                    index = total_cards - 1
+                    st.session_state.current_flashcard = index
+
+                card = flashcards[index]
+
+                st.caption(
+                    f"Kartica {index + 1} od {total_cards}"
+                )
+
+                st.progress(
+                    (index + 1) / total_cards
+                )
+
+                st.markdown("---")
+
+                st.markdown(
+                    f"### ❓ {card.get('question', '')}"
+                )
+
+                st.write("")
+
+                if not st.session_state.show_flashcard_answer:
+
+                    if st.button(
+                        "👀 Prikaži odgovor",
+                        key=f"show_answer_{index}"
+                    ):
+
+                        st.session_state.show_flashcard_answer = True
+                        st.rerun()
+
+                else:
+
+                    st.success(
+                        card.get(
+                            "answer",
+                            ""
+                        )
+                    )
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+
+                        if st.button(
+                            "✅ Znam",
+                            use_container_width=True,
+                            key=f"know_{index}"
+                        ):
+
+                            if index not in st.session_state.known_flashcards:
+                                st.session_state.known_flashcards.append(index)
+
+                            if index in st.session_state.repeat_flashcards:
+                                st.session_state.repeat_flashcards.remove(index)
+
+                            if index < total_cards - 1:
+                                st.session_state.current_flashcard += 1
+
+                            st.session_state.show_flashcard_answer = False
+
+                            st.rerun()
+
+                    with col2:
+
+                        if st.button(
+                            "🔁 Ponovi",
+                            use_container_width=True,
+                            key=f"repeat_{index}"
+                        ):
+
+                            if index not in st.session_state.repeat_flashcards:
+                                st.session_state.repeat_flashcards.append(index)
+
+                            if index < total_cards - 1:
+                                st.session_state.current_flashcard += 1
+
+                            st.session_state.show_flashcard_answer = False
+
+                            st.rerun()
+
+                st.markdown("---")
+
+                col_prev, col_next = st.columns(2)
+
+                with col_prev:
+
+                    if st.button(
+                        "⬅️ Prethodna",
+                        disabled=index == 0,
+                        use_container_width=True
+                    ):
+
+                        st.session_state.current_flashcard -= 1
+                        st.session_state.show_flashcard_answer = False
+                        st.rerun()
+
+                with col_next:
+
+                    if st.button(
+                        "Sledeća ➡️",
+                        disabled=index == total_cards - 1,
+                        use_container_width=True
+                    ):
+
+                        st.session_state.current_flashcard += 1
+                        st.session_state.show_flashcard_answer = False
+                        st.rerun()
+
+                st.write("")
+
+                known_count = len(
+                    st.session_state.known_flashcards
+                )
+
+                repeat_count = len(
+                    st.session_state.repeat_flashcards
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric(
+                    "Kartica",
+                    f"{index + 1}/{total_cards}"
+                )
+
+                col2.metric(
+                    "✅ Znam",
+                    known_count
+                )
+
+                col3.metric(
+                    "🔁 Ponoviti",
+                    repeat_count
+                )
+
+                if repeat_count > 0:
+
+                    st.info(
+                        f"Imaš {repeat_count} kartica "
+                        f"koje treba još da ponoviš."
+                    )
+
+                if st.button(
+                    "🔄 Napravi nove flashcards"
+                ):
+
+                    st.session_state.flashcards = None
+                    st.session_state.current_flashcard = 0
+                    st.session_state.show_flashcard_answer = False
+                    st.session_state.known_flashcards = []
+                    st.session_state.repeat_flashcards = []
+
+                    st.rerun()
+
+
+    # =====================================================
+    # QUIZ TAB
+    # =====================================================
+
+    with tab_quiz:
+
+        st.subheader(
+            "🎯 Proveri znanje"
+        )
+
+        number_of_questions = st.slider(
+            "Broj pitanja",
+            min_value=3,
+            max_value=10,
+            value=5,
+            key="quiz_question_count"
+        )
+
+        if st.button(
+            "🎯 Napravi test",
+            key="generate_quiz"
         ):
 
-            try:
+            with st.spinner(
+                "Pravim test..."
+            ):
 
-                quiz = generate_quiz(
-                    lesson,
-                    number_of_questions
+                try:
+
+                    quiz = generate_quiz(
+                        lesson,
+                        number_of_questions
+                    )
+
+                    st.session_state.quiz = quiz
+                    st.session_state.quiz_submitted = False
+                    st.session_state.current_answers = {}
+
+                    st.rerun()
+
+                except Exception as e:
+
+                    st.error(
+                        f"Greška: {e}"
+                    )
+
+        quiz = st.session_state.quiz
+
+        if quiz:
+
+            st.markdown("---")
+
+            st.subheader(
+                "Test"
+            )
+
+            answers = {}
+
+            questions = quiz.get(
+                "questions",
+                []
+            )
+
+            for i, q in enumerate(
+                questions
+            ):
+
+                st.markdown(
+                    f"### {i + 1}. "
+                    f"{q.get('question', '')}"
                 )
 
-                st.session_state.quiz = quiz
-                st.session_state.quiz_submitted = False
-                st.session_state.current_answers = {}
-
-            except Exception as e:
-
-                st.error(
-                    f"Greška: {e}"
+                qtype = q.get(
+                    "type"
                 )
+
+                key = f"question_{i}"
+
+                if qtype in [
+                    "multiple_choice",
+                    "true_false"
+                ]:
+
+                    answers[i] = st.radio(
+                        "Izaberi odgovor:",
+                        q.get(
+                            "options",
+                            []
+                        ),
+                        key=key,
+                        index=None
+                    )
+
+                elif qtype == "short_answer":
+
+                    answers[i] = st.text_input(
+                        "Tvoj odgovor:",
+                        key=key
+                    )
+
+                st.write("")
+
+            if st.button(
+                "✅ Proveri test",
+                type="primary"
+            ):
+
+                st.session_state.quiz_submitted = True
+                st.session_state.current_answers = answers
+
+                st.rerun()
 
 
 # =========================================================
-# Display quiz
+# Quiz results
 # =========================================================
 
 quiz = st.session_state.quiz
-
-if quiz:
-
-    st.subheader(
-        "Test"
-    )
-
-    answers = {}
-
-    questions = quiz.get(
-        "questions",
-        []
-    )
-
-    for i, q in enumerate(
-        questions
-    ):
-
-        st.markdown(
-            f"### {i + 1}. "
-            f"{q.get('question', '')}"
-        )
-
-        qtype = q.get(
-            "type"
-        )
-
-        key = f"question_{i}"
-
-        if qtype in [
-            "multiple_choice",
-            "true_false"
-        ]:
-
-            answers[i] = st.radio(
-                "Izaberi odgovor:",
-                q.get(
-                    "options",
-                    []
-                ),
-                key=key,
-                index=None
-            )
-
-        elif qtype == "short_answer":
-
-            answers[i] = st.text_input(
-                "Tvoj odgovor:",
-                key=key
-            )
-
-        st.write("")
-
-    if st.button(
-        "✅ Proveri test",
-        type="primary"
-    ):
-
-        st.session_state.quiz_submitted = True
-        st.session_state.current_answers = answers
-
-        st.rerun()
-
-
-# =========================================================
-# Results
-# =========================================================
 
 if (
     quiz
@@ -620,7 +905,7 @@ if (
     st.divider()
 
     st.header(
-        "📊 Rezultat"
+        "📊 Rezultat testa"
     )
 
     answers = st.session_state.current_answers
@@ -649,10 +934,6 @@ if (
             "type"
         )
 
-        # -----------------------------------------
-        # Simple grading for MVP
-        # -----------------------------------------
-
         if not student_answer:
 
             is_correct = False
@@ -676,10 +957,6 @@ if (
                 ==
                 correct_answer
             )
-
-        # -----------------------------------------
-        # Show result
-        # -----------------------------------------
 
         st.markdown(
             f"**{i + 1}. "
@@ -730,10 +1007,6 @@ if (
 
         st.write("")
 
-    # ---------------------------------------------
-    # Overall score
-    # ---------------------------------------------
-
     total = len(
         questions
     )
@@ -768,13 +1041,11 @@ if (
     elif percentage >= 60:
 
         st.info(
-            "Dobro ide. "
-            "Još malo vežbanja. 🙂"
+            "Dobro ide. Još malo vežbanja. 🙂"
         )
 
     else:
 
         st.warning(
-            "Vredi još jednom "
-            "proći kroz beleške."
+            "Vredi još jednom proći kroz beleške."
         )
