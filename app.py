@@ -1,4 +1,3 @@
-import os
 import json
 import base64
 from io import BytesIO
@@ -6,29 +5,11 @@ from io import BytesIO
 import requests
 import streamlit as st
 from PIL import Image
-from dotenv import load_dotenv
 
 
-# --------------------------------------------------
+# =========================================================
 # Configuration
-# --------------------------------------------------
-
-load_dotenv()
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-# Replace with any OpenRouter vision-capable model you want to use
-VISION_MODEL = os.getenv(
-    "VISION_MODEL",
-    "google/gemini-2.5-flash"
-)
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-
-# --------------------------------------------------
-# Streamlit setup
-# --------------------------------------------------
+# =========================================================
 
 st.set_page_config(
     page_title="Moj tutor",
@@ -36,32 +17,54 @@ st.set_page_config(
     layout="wide"
 )
 
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+
+VISION_MODEL = st.secrets.get(
+    "VISION_MODEL",
+    "google/gemini-2.5-flash"
+)
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+# =========================================================
+# App title
+# =========================================================
+
 st.title("📚 Moj tutor")
+
 st.write(
     "Učitaj fotografije lekcije. "
     "Aplikacija će napraviti kratke beleške i test za proveru znanja."
 )
 
 
-# --------------------------------------------------
+# =========================================================
 # Helpers
-# --------------------------------------------------
+# =========================================================
 
 def image_to_data_url(uploaded_file):
     """
-    Convert Streamlit uploaded image to base64 data URL.
+    Convert uploaded image into a base64 data URL
+    suitable for OpenRouter vision models.
     """
 
     image = Image.open(uploaded_file)
 
-    # Normalize to RGB because some phone images can be RGBA / palette
     if image.mode != "RGB":
         image = image.convert("RGB")
 
     buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=90)
 
-    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=90
+    )
+
+    encoded = base64.b64encode(
+        buffer.getvalue()
+    ).decode("utf-8")
 
     return f"data:image/jpeg;base64,{encoded}"
 
@@ -70,12 +73,6 @@ def call_openrouter(messages, temperature=0.2):
     """
     Generic OpenRouter API call.
     """
-
-    if not OPENROUTER_API_KEY:
-        raise ValueError(
-            "OPENROUTER_API_KEY nije pronađen. "
-            "Dodaj ga u .env fajl."
-        )
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -92,12 +89,13 @@ def call_openrouter(messages, temperature=0.2):
         OPENROUTER_URL,
         headers=headers,
         json=payload,
-        timeout=120
+        timeout=180
     )
 
     if response.status_code != 200:
         raise RuntimeError(
-            f"OpenRouter error {response.status_code}: {response.text}"
+            f"OpenRouter error {response.status_code}: "
+            f"{response.text}"
         )
 
     data = response.json()
@@ -107,7 +105,8 @@ def call_openrouter(messages, temperature=0.2):
 
 def extract_json(text):
     """
-    Try to recover JSON even if the model surrounds it with markdown.
+    Extract JSON from model response.
+    Handles responses wrapped in markdown fences.
     """
 
     text = text.strip()
@@ -121,40 +120,42 @@ def extract_json(text):
     end = text.rfind("}")
 
     if start == -1 or end == -1:
-        raise ValueError("Model nije vratio JSON.")
+        raise ValueError(
+            "Model nije vratio validan JSON."
+        )
 
-    return json.loads(text[start:end + 1])
+    return json.loads(
+        text[start:end + 1]
+    )
 
 
-# --------------------------------------------------
-# Lesson extraction
-# --------------------------------------------------
+# =========================================================
+# Lesson analysis
+# =========================================================
 
 def analyse_lesson(uploaded_files):
 
-    content = [
-        {
-            "type": "text",
-            "text": """
+    prompt = """
 Ti si pomoćnik za učenje učeniku osnovne škole.
 
 Na slikama se nalazi jedna lekcija iz udžbenika.
 
-Pažljivo pročitaj sve stranice i napravi strukturisan prikaz lekcije.
+Pažljivo pročitaj sve stranice kao jednu celinu.
 
 VAŽNO:
 - koristi samo informacije koje postoje na slikama;
 - ne dodaj činjenice iz sopstvenog znanja;
-- ignoriši rukom napisane oznake učenika;
+- ignoriši rukom napisane oznake;
 - zadrži važne definicije i činjenice;
-- piši jednostavnim srpskim jezikom;
-- koristi ćirilicu ili latinicu u skladu sa sadržajem, ali budi dosledan.
+- piši jasno i jednostavno;
+- koristi isti jezik kao u udžbeniku;
+- beleške treba da budu kratke i pogodne za učenje.
 
 Vrati SAMO validan JSON u sledećem obliku:
 
 {
   "title": "naslov lekcije",
-  "summary": "kratak pregled lekcije u 2-4 rečenice",
+  "summary": "kratak pregled lekcije u 2 do 4 rečenice",
   "notes": [
     "kratka beleška 1",
     "kratka beleška 2"
@@ -171,11 +172,19 @@ Vrati SAMO validan JSON u sledećem obliku:
   ]
 }
 """
+
+    content = [
+        {
+            "type": "text",
+            "text": prompt
         }
     ]
 
     for uploaded_file in uploaded_files:
-        data_url = image_to_data_url(uploaded_file)
+
+        data_url = image_to_data_url(
+            uploaded_file
+        )
 
         content.append(
             {
@@ -193,32 +202,55 @@ Vrati SAMO validan JSON u sledećem obliku:
         }
     ]
 
-    response = call_openrouter(messages)
+    response = call_openrouter(
+        messages,
+        temperature=0.1
+    )
 
     return extract_json(response)
 
 
-# --------------------------------------------------
+# =========================================================
 # Quiz generation
-# --------------------------------------------------
+# =========================================================
 
-def generate_quiz(lesson, number_of_questions=5):
+def generate_quiz(
+    lesson,
+    number_of_questions=5
+):
 
     prompt = f"""
-Ti si nastavnik koji pravi kratak test za učenika osnovne škole.
+Ti si nastavnik koji pravi test za učenika osnovne škole.
 
-Koristi ISKLJUČIVO sledeći sadržaj lekcije:
+Koristi ISKLJUČIVO sadržaj lekcije koji je dat ispod.
 
-{json.dumps(lesson, ensure_ascii=False, indent=2)}
+Ne koristi dodatno znanje.
 
-Napravi {number_of_questions} pitanja.
+Sadržaj lekcije:
 
-Koristi mešavinu:
-- multiple choice
-- true_false
-- short_answer
+{json.dumps(
+    lesson,
+    ensure_ascii=False,
+    indent=2
+)}
 
-Pitanja treba da proveravaju najvažnije delove lekcije.
+Napravi tačno {number_of_questions} pitanja.
+
+Koristi kombinaciju sledećih tipova:
+
+1. multiple_choice
+2. true_false
+3. short_answer
+
+Pravila:
+
+- pitanja treba da proveravaju najvažnije delove lekcije;
+- neka pitanja proveravaju pamćenje;
+- neka pitanja proveravaju razumevanje;
+- izbegavaj trik pitanja;
+- odgovor mora moći da se pronađe u sadržaju lekcije;
+- za multiple_choice koristi tačno 4 ponuđena odgovora;
+- samo jedan odgovor sme biti tačan.
 
 Vrati SAMO validan JSON:
 
@@ -239,7 +271,10 @@ Vrati SAMO validan JSON:
     {{
       "type": "true_false",
       "question": "tvrdnja",
-      "options": ["Tačno", "Netačno"],
+      "options": [
+        "Tačno",
+        "Netačno"
+      ],
       "correct_answer": "Tačno",
       "explanation": "kratko objašnjenje"
     }},
@@ -269,9 +304,9 @@ Vrati SAMO validan JSON:
     return extract_json(response)
 
 
-# --------------------------------------------------
+# =========================================================
 # Session state
-# --------------------------------------------------
+# =========================================================
 
 if "lesson" not in st.session_state:
     st.session_state.lesson = None
@@ -282,29 +317,50 @@ if "quiz" not in st.session_state:
 if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
 
+if "current_answers" not in st.session_state:
+    st.session_state.current_answers = {}
 
-# --------------------------------------------------
-# Upload
-# --------------------------------------------------
+
+# =========================================================
+# Upload section
+# =========================================================
 
 st.header("1. Učitaj lekciju")
 
 uploaded_files = st.file_uploader(
     "Izaberi fotografije stranica",
-    type=["png", "jpg", "jpeg"],
+    type=[
+        "png",
+        "jpg",
+        "jpeg"
+    ],
     accept_multiple_files=True
 )
 
 if uploaded_files:
 
-    st.write(f"Učitano stranica: **{len(uploaded_files)}**")
-
-    columns = st.columns(
-        min(len(uploaded_files), 4)
+    st.write(
+        f"Učitano stranica: "
+        f"**{len(uploaded_files)}**"
     )
 
-    for i, file in enumerate(uploaded_files):
-        with columns[i % len(columns)]:
+    number_of_columns = min(
+        len(uploaded_files),
+        4
+    )
+
+    columns = st.columns(
+        number_of_columns
+    )
+
+    for i, file in enumerate(
+        uploaded_files
+    ):
+
+        with columns[
+            i % number_of_columns
+        ]:
+
             st.image(
                 file,
                 caption=f"Strana {i + 1}",
@@ -312,9 +368,9 @@ if uploaded_files:
             )
 
 
-# --------------------------------------------------
-# Analyze button
-# --------------------------------------------------
+# =========================================================
+# Analyze lesson
+# =========================================================
 
 if uploaded_files:
 
@@ -336,6 +392,7 @@ if uploaded_files:
                 st.session_state.lesson = lesson
                 st.session_state.quiz = None
                 st.session_state.quiz_submitted = False
+                st.session_state.current_answers = {}
 
             except Exception as e:
 
@@ -344,9 +401,9 @@ if uploaded_files:
                 )
 
 
-# --------------------------------------------------
-# Lesson display
-# --------------------------------------------------
+# =========================================================
+# Display lesson
+# =========================================================
 
 lesson = st.session_state.lesson
 
@@ -358,6 +415,8 @@ if lesson:
         f"2. {lesson.get('title', 'Lekcija')}"
     )
 
+    # Summary
+
     st.subheader("Ukratko")
 
     st.write(
@@ -367,15 +426,26 @@ if lesson:
         )
     )
 
-    st.subheader("📝 Beleške")
+    # Notes
 
-    for note in lesson.get(
+    notes = lesson.get(
         "notes",
         []
-    ):
-        st.write(
-            f"• {note}"
+    )
+
+    if notes:
+
+        st.subheader(
+            "📝 Kratke beleške"
         )
+
+        for note in notes:
+
+            st.write(
+                f"• {note}"
+            )
+
+    # Concepts
 
     concepts = lesson.get(
         "concepts",
@@ -404,6 +474,8 @@ if lesson:
                 f"**{term}:** {definition}"
             )
 
+    # Facts
+
     facts = lesson.get(
         "facts",
         []
@@ -416,14 +488,15 @@ if lesson:
         )
 
         for fact in facts:
+
             st.write(
                 f"• {fact}"
             )
 
 
-# --------------------------------------------------
+# =========================================================
 # Generate quiz
-# --------------------------------------------------
+# =========================================================
 
 if lesson:
 
@@ -457,6 +530,7 @@ if lesson:
 
                 st.session_state.quiz = quiz
                 st.session_state.quiz_submitted = False
+                st.session_state.current_answers = {}
 
             except Exception as e:
 
@@ -465,9 +539,9 @@ if lesson:
                 )
 
 
-# --------------------------------------------------
-# Quiz
-# --------------------------------------------------
+# =========================================================
+# Display quiz
+# =========================================================
 
 quiz = st.session_state.quiz
 
@@ -484,13 +558,18 @@ if quiz:
         []
     )
 
-    for i, q in enumerate(questions):
+    for i, q in enumerate(
+        questions
+    ):
 
         st.markdown(
-            f"### {i + 1}. {q['question']}"
+            f"### {i + 1}. "
+            f"{q.get('question', '')}"
         )
 
-        qtype = q.get("type")
+        qtype = q.get(
+            "type"
+        )
 
         key = f"question_{i}"
 
@@ -526,10 +605,12 @@ if quiz:
         st.session_state.quiz_submitted = True
         st.session_state.current_answers = answers
 
+        st.rerun()
 
-# --------------------------------------------------
+
+# =========================================================
 # Results
-# --------------------------------------------------
+# =========================================================
 
 if (
     quiz
@@ -542,19 +623,18 @@ if (
         "📊 Rezultat"
     )
 
-    answers = st.session_state.get(
-        "current_answers",
-        {}
-    )
-
-    score = 0
+    answers = st.session_state.current_answers
 
     questions = quiz.get(
         "questions",
         []
     )
 
-    for i, q in enumerate(questions):
+    score = 0
+
+    for i, q in enumerate(
+        questions
+    ):
 
         student_answer = answers.get(
             i
@@ -565,19 +645,28 @@ if (
             ""
         )
 
-        qtype = q.get("type")
+        qtype = q.get(
+            "type"
+        )
 
-        # Exact matching for now.
-        # We'll make short-answer grading smarter later.
-        if student_answer is None:
+        # -----------------------------------------
+        # Simple grading for MVP
+        # -----------------------------------------
+
+        if not student_answer:
+
             is_correct = False
 
         elif qtype == "short_answer":
 
             is_correct = (
-                student_answer.strip().lower()
+                student_answer
+                .strip()
+                .lower()
                 ==
-                correct_answer.strip().lower()
+                correct_answer
+                .strip()
+                .lower()
             )
 
         else:
@@ -588,23 +677,45 @@ if (
                 correct_answer
             )
 
+        # -----------------------------------------
+        # Show result
+        # -----------------------------------------
+
+        st.markdown(
+            f"**{i + 1}. "
+            f"{q.get('question', '')}**"
+        )
+
         if is_correct:
 
             score += 1
 
             st.success(
-                f"{i + 1}. Tačno ✅"
+                "Tačno ✅"
             )
 
         else:
 
             st.error(
-                f"{i + 1}. Netačno"
+                "Netačno"
             )
 
+            if student_answer:
+
+                st.write(
+                    f"Tvoj odgovor: "
+                    f"**{student_answer}**"
+                )
+
+            else:
+
+                st.write(
+                    "Nisi unela odgovor."
+                )
+
             st.write(
-                f"**Tačan odgovor:** "
-                f"{correct_answer}"
+                f"Tačan odgovor: "
+                f"**{correct_answer}**"
             )
 
         explanation = q.get(
@@ -617,15 +728,25 @@ if (
                 explanation
             )
 
+        st.write("")
+
+    # ---------------------------------------------
+    # Overall score
+    # ---------------------------------------------
+
+    total = len(
+        questions
+    )
+
     percentage = (
-        score / len(questions) * 100
-        if questions
+        score / total * 100
+        if total
         else 0
     )
 
     st.metric(
         "Rezultat",
-        f"{score} / {len(questions)}"
+        f"{score} / {total}"
     )
 
     st.progress(
@@ -647,11 +768,13 @@ if (
     elif percentage >= 60:
 
         st.info(
-            "Dobro ide. Još malo vežbanja. 🙂"
+            "Dobro ide. "
+            "Još malo vežbanja. 🙂"
         )
 
     else:
 
         st.warning(
-            "Vredi još jednom proći kroz beleške."
+            "Vredi još jednom "
+            "proći kroz beleške."
         )
